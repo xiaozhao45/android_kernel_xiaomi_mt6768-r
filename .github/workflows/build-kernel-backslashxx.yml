@@ -165,6 +165,7 @@ jobs:
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            LD_COMPAT=arm-linux-gnueabi-ld
             LD=ld.lld
             AR=llvm-ar
             NM=llvm-nm
