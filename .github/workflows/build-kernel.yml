@@ -222,7 +222,7 @@ jobs:
           echo "=== Merging kernel configuration ==="
           DEVICE="${{ matrix.device }}"
           DEFCONFIG="arch/arm64/configs/${DEVICE}_defconfig"
-          FRAGMENT="scripts/kernelsu_config.fragment"
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
           
           if [ ! -f "$DEFCONFIG" ]; then
             echo "❌ Defconfig not found: $DEFCONFIG"
@@ -275,39 +275,29 @@ jobs:
           # Create output directory
           mkdir -p out
 
+          COMMON_ARGS="
+            O=out
+            ARCH=arm64
+            LLVM=
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          "
+
           # Apply defconfig
           echo "[INFO] Applying ${DEVICE}_defconfig..."
-          make -j$(nproc) \
-            O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            "${DEVICE}_defconfig"
+          make -j$(nproc) $COMMON_ARGS "${DEVICE}_defconfig"
 
           # Build
           echo "[INFO] Building kernel..."
-          make -j$(nproc) \
-            O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            2>&1 | tee build.log
+          make -j$(nproc) $COMMON_ARGS 2>&1 | tee build.log
 
           # Check build result
           if [ -f "out/arch/arm64/boot/Image.gz" ] || [ -f "out/arch/arm64/boot/Image" ]; then

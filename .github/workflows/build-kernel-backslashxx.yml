@@ -161,6 +161,7 @@ jobs:
           COMMON_ARGS="
             O=out
             ARCH=arm64
+            LLVM=
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
