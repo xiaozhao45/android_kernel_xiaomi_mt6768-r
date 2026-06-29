@@ -412,7 +412,30 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 	if (call_undef_hook(regs) == 0)
 		return;
 
-	BUG_ON(!user_mode(regs));
+	if (!user_mode(regs)) {
+		unsigned long esr = read_sysreg(esr_el1);
+		unsigned long addr = instruction_pointer(regs);
+		unsigned int insn = 0;
+
+		pr_emerg("do_undefinstr: kernel-mode undefined instruction!\n");
+		pr_emerg("  ESR_EL1 = 0x%016lx (EC=0x%02lx, ISS=0x%05lx)\n",
+			 esr, (esr >> 26) & 0x3f, esr & 0x1ffffff);
+		pr_emerg("  Faulting PC = 0x%016lx (%pS)\n", addr, (void *)addr);
+		pr_emerg("  pstate = 0x%016lx (M=0x%lx)\n",
+			 regs->pstate, regs->pstate & 0x1f);
+		pr_emerg("  Process: %s (pid: %d)\n", current->comm, current->pid);
+
+		if (addr < PAGE_OFFSET ||
+		    probe_kernel_read(&insn, (unsigned int *)addr, sizeof(insn)))
+			pr_emerg("  [cannot read instruction at PC]\n");
+		else
+			pr_emerg("  Instruction at PC: 0x%08x\n", insn);
+
+		pr_emerg("  Call trace:\n");
+		dump_stack();
+
+		BUG_ON(!user_mode(regs));
+	}
 	force_signal_inject(SIGILL, ILL_ILLOPC, regs, 0);
 }
 

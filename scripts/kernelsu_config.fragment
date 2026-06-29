@@ -6,10 +6,11 @@
 # KernelSU Requirements
 # ==========================================
 # Kprobes for dynamic hooks (early boot)
-CONFIG_KPROBES=y
-CONFIG_HAVE_KPROBES=y
-CONFIG_KPROBE_EVENTS=y
-CONFIG_KRETPROBES=y
+# TEMPORARILY DISABLED to test if kprobes cause do_undefinstr crash
+# CONFIG_KPROBES=y
+# CONFIG_HAVE_KPROBES=y
+# CONFIG_KPROBE_EVENTS=y
+# CONFIG_KRETPROBES=y
 CONFIG_KALLSYMS=y
 CONFIG_MODULES=y
 

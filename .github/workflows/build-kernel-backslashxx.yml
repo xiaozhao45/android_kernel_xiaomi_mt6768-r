@@ -61,11 +61,28 @@ jobs:
             build-essential bc bison flex libssl-dev libelf-dev \
             cpio zip unzip curl wget python3 device-tree-compiler \
             u-boot-tools lz4 xz-utils bzip2 pigz libncurses-dev \
-            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            ccache
           echo "--- Toolchain versions ---"
           clang --version | head -1
           ld.lld --version | head -1
           aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ccache-${{ matrix.device }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.device }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p /tmp/ccache
+          ccache -M 2G
+          ccache -o compression=true
+          ccache -o cache_dir=/tmp/ccache
+          ccache -z
 
       - name: Clone backslashxx/KernelSU
         run: |
@@ -162,7 +179,7 @@ jobs:
             O=out
             ARCH=arm64
             LLVM=
-            CC=clang
+            CC="ccache clang"
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
             LD_COMPAT=arm-linux-gnueabi-ld
@@ -186,6 +203,9 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image.gz" ] || [ -f "out/arch/arm64/boot/Image" ]; then
             echo "::notice::Kernel built successfully"
             ls -lh out/arch/arm64/boot/Image*
+            echo "::group::ccache stats"
+            ccache -s
+            echo "::endgroup::"
           else
             echo "::error::Build failed"
             tail -80 build.log
