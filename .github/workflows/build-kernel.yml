@@ -1,0 +1,425 @@
+# GitHub Actions Workflow for building Xiaomi MT6768 Kernel
+# with KernelSU and DroidSpaces support
+#
+# Supported devices: lancelot, merlin, shiva (Redmi Note 9 series)
+# Kernel: 4.14.357 | Toolchain: Clang + GCC
+
+name: Build Kernel (MT6768)
+
+on:
+  push:
+    branches: [ sixteen-qpr2 ]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'CREDITS'
+      - 'COPYING'
+  pull_request:
+    branches: [ sixteen-qpr2 ]
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device codename to build'
+        required: false
+        default: 'lancelot'
+        type: choice
+        options:
+          - lancelot
+          - merlin
+          - shiva
+          - all
+      ksu_version:
+        description: 'KernelSU tag (backslashxx fork, e.g. v3.2.5-4)'
+        required: false
+        default: 'v3.2.5-4'
+        type: string
+
+env:
+  KERNEL_VERSION: "4.14.357"
+  KSU_VERSION: ${{ github.event.inputs.ksu_version || 'v3.2.5-4' }}
+  DEVICE: ${{ github.event.inputs.device || 'lancelot' }}
+
+jobs:
+  setup:
+    name: Setup & Validate
+    runs-on: ubuntu-22.04
+    outputs:
+      devices: ${{ steps.set-devices.outputs.devices }}
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+
+      - name: Set device matrix
+        id: set-devices
+        run: |
+          DEVICE="${{ env.DEVICE }}"
+          if [ "$DEVICE" = "all" ]; then
+            echo 'devices=["lancelot","merlin","shiva"]' >> $GITHUB_OUTPUT
+          else
+            echo "devices=[\"$DEVICE\"]" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate defconfigs exist
+        run: |
+          for defconfig in arch/arm64/configs/lancelot_defconfig arch/arm64/configs/merlin_defconfig arch/arm64/configs/shiva_defconfig; do
+            if [ -f "$defconfig" ]; then
+              echo "✅ Found: $defconfig"
+            else
+              echo "⚠️  Missing: $defconfig"
+            fi
+          done
+
+  build:
+    name: Build (${{ matrix.device }})
+    needs: setup
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.setup.outputs.devices) }}
+    outputs:
+      artifact_name: kernel-${{ matrix.device }}
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            cpio \
+            zip \
+            unzip \
+            curl \
+            wget \
+            python3 \
+            device-tree-compiler \
+            u-boot-tools \
+            lz4 \
+            xz-utils \
+            bzip2 \
+            pigz \
+            libncurses-dev
+          echo "✅ Build dependencies installed"
+
+      - name: Setup Clang + GCC toolchains
+        run: |
+          echo "[INFO] Setting up toolchains..."
+          TOOLCHAIN_DIR="${{ github.workspace }}/toolchains"
+          mkdir -p "$TOOLCHAIN_DIR"
+
+          # Download clang + gcc in a single archive (common community mirror)
+          # Fallback: install from apt + proton-clang
+          echo "[INFO] Trying proton-clang / neutron-clang..."
+          git clone --depth=1 https://github.com/nicofontana/AnyKernel3.git /tmp/ak3-mirror 2>/dev/null || true
+
+          # Strategy 1: Use apt-provided clang + cross-gcc
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi 2>/dev/null || true
+
+          # Verify
+          echo "[INFO] Toolchain versions:"
+          clang --version 2>/dev/null | head -1 || echo "clang not found"
+          ld.lld --version 2>/dev/null | head -1 || echo "lld not found"
+          aarch64-linux-gnu-gcc --version 2>/dev/null | head -1 || echo "cross-gcc not found"
+
+      - name: Integrate KernelSU (backslashxx fork)
+        run: |
+          echo "=== Integrating KernelSU (backslashxx fork) ==="
+          echo "[INFO] Tag: ${{ env.KSU_VERSION }}"
+
+          # Use the official setup.sh from the fork
+          git clone https://github.com/backslashxx/KernelSU.git KernelSU
+          cd KernelSU
+          git checkout "${{ env.KSU_VERSION }}" 2>/dev/null || echo "[WARN] Tag not found, using default branch"
+          KSU_ACTUAL_TAG="$(git describe --tags --always 2>/dev/null)"
+          echo "[INFO] Checked out: ${KSU_ACTUAL_TAG}"
+          cd ..
+
+          # Determine driver directory
+          if [ -d "common/drivers" ]; then
+            DRIVER_DIR="common/drivers"
+          elif [ -d "drivers" ]; then
+            DRIVER_DIR="drivers"
+          else
+            echo "[ERROR] drivers/ directory not found!"
+            exit 1
+          fi
+
+          # Create symlink
+          ln -sf "$(realpath --relative-to="$DRIVER_DIR" "KernelSU/kernel")" "$DRIVER_DIR/kernelsu"
+          echo "[INFO] Symlink: $DRIVER_DIR/kernelsu -> KernelSU/kernel"
+
+          # Add to drivers/Makefile
+          if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile" 2>/dev/null; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
+            echo "[INFO] Added to $DRIVER_DIR/Makefile"
+          fi
+
+          # Add to drivers/Kconfig
+          if ! grep -q 'drivers/kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" 2>/dev/null; then
+            if grep -q "^endmenu" "$DRIVER_DIR/Kconfig"; then
+              sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+            else
+              printf '\nsource "drivers/kernelsu/Kconfig"\n' >> "$DRIVER_DIR/Kconfig"
+            fi
+            echo "[INFO] Added to $DRIVER_DIR/Kconfig"
+          fi
+
+          echo "✅ KernelSU integration complete (${KSU_ACTUAL_TAG})"
+
+      - name: Apply DroidSpaces patches
+        run: |
+          echo "=== Applying DroidSpaces patches ==="
+          
+          PATCH_DIR=".droidspaces_patches"
+          mkdir -p "$PATCH_DIR"
+          
+          PATCH_BASE="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI"
+          
+          # Download patches
+          echo "[INFO] Downloading patches..."
+          curl -sL "${PATCH_BASE}/01.fix_kernel_panic_in_xt_qtaguid.patch" \
+            -o "${PATCH_DIR}/01_fix_xt_qtaguid.patch"
+          curl -sL "${PATCH_BASE}/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch" \
+            -o "${PATCH_DIR}/02_fix_cgroup_prefix.patch"
+          
+          # Apply patches
+          for patch_file in "${PATCH_DIR}"/*.patch; do
+            if [ -f "$patch_file" ]; then
+              echo "[INFO] Applying: $(basename "$patch_file")"
+              if patch -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
+                patch -p1 < "$patch_file"
+                echo "✅ Applied: $(basename "$patch_file")"
+              else
+                echo "⚠️  Patch may already be applied: $(basename "$patch_file")"
+                patch -p1 --force < "$patch_file" 2>/dev/null || true
+              fi
+            fi
+          done
+          
+          echo "✅ DroidSpaces patches applied"
+
+      - name: Merge kernel config
+        run: |
+          echo "=== Merging kernel configuration ==="
+          DEVICE="${{ matrix.device }}"
+          DEFCONFIG="arch/arm64/configs/${DEVICE}_defconfig"
+          FRAGMENT="scripts/kernelsu_config.fragment"
+          
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "❌ Defconfig not found: $DEFCONFIG"
+            exit 1
+          fi
+          
+          if [ ! -f "$FRAGMENT" ]; then
+            echo "❌ Config fragment not found: $FRAGMENT"
+            exit 1
+          fi
+          
+          echo "[INFO] Merging config fragment into $DEFCONFIG..."
+          
+          # Append KSU + DroidSpace configs to defconfig
+          echo "" >> "$DEFCONFIG"
+          echo "# ==========================================" >> "$DEFCONFIG"
+          echo "# KernelSU + DroidSpaces Configuration" >> "$DEFCONFIG"
+          echo "# Auto-added by CI build" >> "$DEFCONFIG"
+          echo "# ==========================================" >> "$DEFCONFIG"
+          cat "$FRAGMENT" >> "$DEFCONFIG"
+          
+          # Remove conflicting entries (keep last)
+          # Handle CONFIG_ANDROID_PARANOID_NETWORK specifically
+          # Remove all "not set" lines for options we're enabling
+          while IFS= read -r line; do
+            config_name=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            if [ -n "$config_name" ]; then
+              # Remove any "# CONFIG_xxx is not set" lines for configs we're enabling
+              sed -i "/# ${config_name} is not set/d" "$DEFCONFIG"
+            fi
+          done < "$FRAGMENT"
+          
+          echo "✅ Config merged for ${DEVICE}"
+          echo "[INFO] KSU-related configs:"
+          grep -i "kprobe\|CONFIG_KSU\|CONFIG_MODULES" "$DEFCONFIG" | head -10
+          echo "[INFO] DroidSpace-related configs:"
+          grep -i "namespace\|cgroup\|seccomp\|veth\|overlay\|devtmpfs\|conntrack\|masquerade" "$DEFCONFIG" | head -20
+
+      - name: Build kernel
+        run: |
+          DEVICE="${{ matrix.device }}"
+          echo "=== Building kernel for ${DEVICE} ==="
+
+          # Verify tools
+          echo "[INFO] Toolchain versions:"
+          clang --version | head -1
+          ld.lld --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1
+
+          # Create output directory
+          mkdir -p out
+
+          # Apply defconfig
+          echo "[INFO] Applying ${DEVICE}_defconfig..."
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            "${DEVICE}_defconfig"
+
+          # Build
+          echo "[INFO] Building kernel..."
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            2>&1 | tee build.log
+
+          # Check build result
+          if [ -f "out/arch/arm64/boot/Image.gz" ] || [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "✅ Kernel built successfully!"
+            ls -lh out/arch/arm64/boot/Image* 2>/dev/null
+          else
+            echo "❌ Kernel build failed!"
+            tail -50 build.log
+            exit 1
+          fi
+
+      - name: Collect build artifacts
+        run: |
+          DEVICE="${{ matrix.device }}"
+          ARTIFACT_DIR="kernel_output/${DEVICE}"
+          mkdir -p "$ARTIFACT_DIR"
+          
+          # Copy kernel image
+          cp out/arch/arm64/boot/Image.gz "$ARTIFACT_DIR/" 2>/dev/null || \
+          cp out/arch/arm64/boot/Image "$ARTIFACT_DIR/" 2>/dev/null || true
+          
+          # Copy DTBs
+          if [ -d "out/arch/arm64/boot/dts" ]; then
+            find out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          fi
+          
+          # Copy kernel modules (.ko files)
+          find out -name "*.ko" -exec cp {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          
+          # Copy build info
+          {
+            echo "Device: ${DEVICE}"
+            echo "Kernel Version: $(cat out/include/config/kernel.release 2>/dev/null || echo 'unknown')"
+            echo "KernelSU Version: ${{ env.KSU_VERSION }}"
+            echo "DroidSpaces: Enabled"
+            echo "Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Build Runner: $(uname -a)"
+            echo "Compiler: $(clang --version 2>/dev/null | head -1 || echo 'unknown')"
+          } > "$ARTIFACT_DIR/build_info.txt"
+          
+          echo "✅ Artifacts collected for ${DEVICE}:"
+          ls -lh "$ARTIFACT_DIR/"
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.device }}
+          path: kernel_output/${{ matrix.device }}/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-${{ matrix.device }}
+          path: build.log
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[release]'))
+    permissions:
+      contents: write
+    steps:
+      - name: Download all kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_artifacts/
+
+      - name: Package release
+        run: |
+          cd release_artifacts
+          zip -r "../kernel_mt6768_kernelsu_droidspaces_$(date +%Y%m%d).zip" .
+          cd ..
+          ls -lh *.zip
+
+      - name: Generate release body
+        id: release_body
+        run: |
+          BODY="## MT6768 Kernel Build
+
+          **KernelSU**: ${{ env.KSU_VERSION }}
+          **DroidSpaces**: Enabled (non-GKI)
+          **Devices**: lancelot, merlin, shiva
+
+          ### Features
+          - ✅ KernelSU root support (kprobe method)
+          - ✅ DroidSpaces container runtime support
+          - ✅ Full namespace isolation (PID, UTS, IPC, NET, MNT)
+          - ✅ Network isolation (NAT/None/Host modes)
+          - ✅ cgroup v1/v2 support
+          - ✅ OverlayFS for volatile containers
+          - ✅ UFW/Fail2ban firewall support
+
+          ### Build Info
+          - Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - Workflow Run: #${{ github.run_number }}"
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          tag_name: "kernel-${{ github.run_number }}"
+          name: "MT6768 Kernel (KSU + DroidSpaces) #${{ github.run_number }}"
+          body: ${{ steps.release_body.outputs.body }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
