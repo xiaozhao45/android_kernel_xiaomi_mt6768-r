@@ -213,15 +213,14 @@ CONFIG_CGROUP_HUGETLB=y
 # =====================================================
 
 # Filesystem modules
-CONFIG_F2FS_FS=m
-CONFIG_EXFAT_FS=m
+# F2FS, EXFAT: already =y in defconfig (Android data partition), keep built-in
 CONFIG_XFS_FS=m
 CONFIG_NFS_V3=m
 CONFIG_NFS_V4=m
 CONFIG_NFSD=m
 CONFIG_CIFS=m
 CONFIG_9P_FS=m
-CONFIG_ISO9660_FS=m
+# ISO9660_FS: already =y in defconfig, keep built-in
 CONFIG_UDF_FS=m
 CONFIG_ECRYPT_FS=m
 
@@ -233,7 +232,7 @@ CONFIG_OPENVSWITCH=m
 CONFIG_TIPC=m
 
 # Container / storage
-CONFIG_ZRAM=m
+# ZRAM: already =y in defconfig (Android swap), keep built-in
 CONFIG_ZSWAP=y
 CONFIG_BLK_DEV_NBD=m
 CONFIG_BLK_DEV_LOOP=m
@@ -242,11 +241,11 @@ CONFIG_BLK_DEV_CRYPTOLOOP=m
 # Debug / diagnostics (built-in only, no module support)
 CONFIG_MAGIC_SYSRQ=y
 CONFIG_DEBUG_FS=y
-CONFIG_FTRACE=y
-CONFIG_FUNCTION_TRACER=y
+# FTRACE/FUNCTION_TRACER: removed - causes clang error in trace_event_perf.c
+# (variable redefinition, same scope)
 
 # USB devices
-CONFIG_USB_STORAGE=m
+# USB_STORAGE: already =y in defconfig, keep built-in
 CONFIG_USB_SERIAL=m
 CONFIG_USB_ACM=m
 CONFIG_USB_PRINTER=m
