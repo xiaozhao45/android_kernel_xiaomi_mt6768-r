@@ -201,8 +201,8 @@ CONFIG_NFT_FIB=y
 CONFIG_NFT_FIB_IPV4=y
 CONFIG_NFT_FIB_IPV6=y
 
-# SCTP protocol
-CONFIG_IP_SCTP=y
+# SCTP protocol - removed: clang incompatible pointer type error in net/sctp/output.c
+# CONFIG_IP_SCTP=y
 
 # cgroup perf and hugepage
 CONFIG_CGROUP_PERF=y
