@@ -34,6 +34,15 @@
 #include "avc_ss.h"
 #include "classmap.h"
 
+/*
+ * KernelSU: direct hook for SELinux SID replacement.
+ * Replaces the kprobe-based approach which causes undefined instruction
+ * panics on Cortex-A75 / kernel 4.14 due to broken OOL single-step.
+ */
+#ifdef CONFIG_KSU
+extern void ksu_slow_avc_audit(u32 *tsid);
+#endif
+
 #define AVC_CACHE_SLOTS			512
 #define AVC_DEF_CACHE_THRESHOLD		512
 #define AVC_CACHE_RECLAIM		16
@@ -784,6 +793,9 @@ noinline int slow_avc_audit(struct selinux_state *state,
 			    struct common_audit_data *a,
 			    unsigned int flags)
 {
+#ifdef CONFIG_KSU
+	ksu_slow_avc_audit(&tsid);
+#endif
 	struct common_audit_data stack_data;
 	struct selinux_audit_data sad;
 

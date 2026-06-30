@@ -112,6 +112,18 @@ jobs:
 
           echo "::notice::KernelSU integrated into drivers/"
 
+      - name: Patch KSU selinux_hide (disable kprobe)
+        run: |
+          # Disable kprobe on slow_avc_audit in selinux_hide.c.
+          # We use a direct hook in avc.c instead, which avoids the
+          # undefined instruction panic caused by broken OOL single-step
+          # on Cortex-A75 / kernel 4.14.
+          SELINUX_HIDE="KernelSU/kernel/feature/selinux_hide.c"
+          if [ -f "$SELINUX_HIDE" ]; then
+            sed -i 's|^\(.*\)slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);|#if 0 /* KSU fix: use direct hook in avc.c */\n\1slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);\n#endif|' "$SELINUX_HIDE"
+            echo "::notice::Patched selinux_hide.c: kprobe disabled"
+          fi
+
       - name: Download & apply DroidSpaces patches
         run: |
           PATCH_DIR=".droidspaces_patches"
