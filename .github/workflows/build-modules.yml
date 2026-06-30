@@ -6,7 +6,7 @@ name: Build Modules
 
 on:
   push:
-    branches: [ fix/ksu_panic ]
+    branches: [ fix/ksu_panic, build_modules ]
   workflow_dispatch:
     inputs:
       device:
