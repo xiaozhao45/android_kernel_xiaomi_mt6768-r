@@ -7,14 +7,6 @@ name: Kernel Check
 on:
   push:
     branches: [ fix/ksu_panic, build_modules, sixteen-qpr2 ]
-    paths:
-      - 'scripts/kernelsu_backslashxx_config.fragment'
-      - 'scripts/kernelsu_config.fragment'
-      - 'arch/arm64/configs/*_defconfig'
-      - 'security/selinux/avc.c'
-      - '.github/workflows/build-kernel-backslashxx.yml'
-      - '.github/workflows/build-kernel.yml'
-      - '.github/workflows/build-modules.yml'
   pull_request:
     branches: [ sixteen-qpr2 ]
   workflow_dispatch:
