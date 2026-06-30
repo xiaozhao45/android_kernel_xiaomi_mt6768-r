@@ -228,23 +228,45 @@ jobs:
         run: |
           DEVICE="${{ matrix.device }}"
           DIR="kernel_output/${DEVICE}"
-          mkdir -p "$DIR"
+          MODULES_DIR="${DIR}/modules"
+          mkdir -p "$DIR" "$MODULES_DIR"
 
           cp out/arch/arm64/boot/Image.gz "$DIR/" 2>/dev/null || \
           cp out/arch/arm64/boot/Image "$DIR/" 2>/dev/null || true
 
           find out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} "$DIR/" \; 2>/dev/null || true
-          find out -name "*.ko" -exec cp {} "$DIR/" \; 2>/dev/null || true
+
+          # Copy kernel modules preserving directory structure
+          cd out
+          find . -name "*.ko" -print0 | while IFS= read -r -d '' f; do
+            dest="${MODULES_DIR}/${f#./}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+          cd ..
+
+          # Generate module list
+          find "$MODULES_DIR" -name "*.ko" -printf '%P\n' | sort > "$DIR/modules.list"
+          MODULE_COUNT=$(wc -l < "$DIR/modules.list")
+          echo "::notice::${MODULE_COUNT} kernel modules collected"
+
+          # Tar modules for easy deployment
+          tar -czf "$DIR/modules.tar.gz" -C "$MODULES_DIR" .
 
           {
             echo "Device: ${DEVICE}"
             echo "Kernel: $(cat out/include/config/kernel.release 2>/dev/null || echo N/A)"
             echo "KernelSU: backslashxx/KernelSU ${KSU_VER}"
             echo "DroidSpaces: Enabled"
+            echo "Modules: ${MODULE_COUNT} .ko files"
             echo "Build: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           } > "$DIR/build_info.txt"
 
+          echo "=== Artifacts ==="
           ls -lh "$DIR/"
+          echo ""
+          echo "=== Modules (${MODULE_COUNT}) ==="
+          cat "$DIR/modules.list"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
