@@ -6,7 +6,7 @@ name: Kernel Check
 
 on:
   push:
-    branches: [ fix/ksu_panic, sixteen-qpr2 ]
+    branches: [ fix/ksu_panic, build_modules, sixteen-qpr2 ]
     paths:
       - 'scripts/kernelsu_backslashxx_config.fragment'
       - 'scripts/kernelsu_config.fragment'
