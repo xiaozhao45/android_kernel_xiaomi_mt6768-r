@@ -275,10 +275,10 @@ jobs:
           # Create output directory
           mkdir -p out
 
-          COMMON_ARGS="
+          COMMON_ARGS=(
             O=out
             ARCH=arm64
-            LLVM=
+            LLVM=1
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
@@ -290,15 +290,15 @@ jobs:
             OBJDUMP=llvm-objdump
             STRIP=llvm-strip
             CLANG_TRIPLE=aarch64-linux-gnu-
-          "
+          )
 
           # Apply defconfig
           echo "[INFO] Applying ${DEVICE}_defconfig..."
-          make -j$(nproc) $COMMON_ARGS "${DEVICE}_defconfig"
+          make -j$(nproc) "${COMMON_ARGS[@]}" "${DEVICE}_defconfig"
 
           # Build
           echo "[INFO] Building kernel..."
-          make -j$(nproc) $COMMON_ARGS 2>&1 | tee build.log
+          make -j$(nproc) "${COMMON_ARGS[@]}" 2>&1 | tee build.log
 
           # Check build result
           if [ -f "out/arch/arm64/boot/Image.gz" ] || [ -f "out/arch/arm64/boot/Image" ]; then
