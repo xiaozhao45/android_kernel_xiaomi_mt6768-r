@@ -793,11 +793,12 @@ noinline int slow_avc_audit(struct selinux_state *state,
 			    struct common_audit_data *a,
 			    unsigned int flags)
 {
+	struct common_audit_data stack_data;
+	struct selinux_audit_data sad;
+
 #ifdef CONFIG_KSU
 	ksu_slow_avc_audit(&tsid);
 #endif
-	struct common_audit_data stack_data;
-	struct selinux_audit_data sad;
 
 	if (!a) {
 		a = &stack_data;
