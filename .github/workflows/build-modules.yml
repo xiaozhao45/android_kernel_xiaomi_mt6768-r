@@ -1,0 +1,198 @@
+# Build Kernel Modules only (for module development/testing)
+# Builds the full kernel first (required for Module.symvers), then modules
+# Outputs only .ko files as artifacts
+
+name: Build Modules
+
+on:
+  push:
+    branches: [ fix/ksu_panic ]
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device codename'
+        required: false
+        default: 'lancelot'
+        type: choice
+        options:
+          - lancelot
+          - merlin
+          - shiva
+          - all
+
+env:
+  KSU_REPO: "https://github.com/backslashxx/KernelSU.git"
+  KSU_TAG: "v3.2.5-4"
+  DEVICE: ${{ github.event.inputs.device || 'lancelot' }}
+
+jobs:
+  build-modules:
+    name: Modules (${{ matrix.device }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(
+          github.event.inputs.device == 'all' && '["lancelot","merlin","shiva"]'
+          || format('["{0}"]', github.event.inputs.device || 'lancelot')
+          ) }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            cpio zip unzip curl wget python3 device-tree-compiler \
+            u-boot-tools lz4 xz-utils bzip2 pigz libncurses-dev \
+            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            ccache
+          echo "--- Toolchain versions ---"
+          clang --version | head -1
+          ld.lld --version | head -1
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ccache-modules-${{ matrix.device }}-${{ github.sha }}
+          restore-keys: |
+            ccache-modules-${{ matrix.device }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p /tmp/ccache
+          ccache -M 2G
+          ccache -o compression=true
+          ccache -o cache_dir=/tmp/ccache
+          ccache -z
+
+      - name: Clone KernelSU
+        run: |
+          git clone "$KSU_REPO" KernelSU
+          cd KernelSU
+          git checkout "$KSU_TAG" 2>/dev/null || echo "::warning::Tag $KSU_TAG not found"
+          echo "KSU_VER=$(git describe --tags --always)" >> $GITHUB_ENV
+
+      - name: Integrate KernelSU
+        run: |
+          DRIVER_DIR="drivers"
+          ln -sf "$(realpath --relative-to="$DRIVER_DIR" "KernelSU/kernel")" \
+            "$DRIVER_DIR/kernelsu"
+          if ! grep -q "kernelsu" "$DRIVER_DIR/Makefile"; then
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
+          fi
+          if ! grep -q 'drivers/kernelsu/Kconfig' "$DRIVER_DIR/Kconfig"; then
+            sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+          fi
+
+          # Disable kprobe on slow_avc_audit
+          SELINUX_HIDE="KernelSU/kernel/feature/selinux_hide.c"
+          if [ -f "$SELINUX_HIDE" ]; then
+            sed -i 's|^\(.*\)slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);|#if 0 /* KSU fix: use direct hook in avc.c */\n\1slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);\n#endif|' "$SELINUX_HIDE"
+          fi
+
+      - name: Merge kernel config
+        run: |
+          DEVICE="${{ matrix.device }}"
+          DEFCONFIG="arch/arm64/configs/${DEVICE}_defconfig"
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
+
+          {
+            echo ""
+            echo "# =========================================="
+            echo "# backslashxx/KernelSU + DroidSpaces"
+            echo "# Auto-added by CI"
+            echo "# =========================================="
+            cat "$FRAGMENT"
+          } >> "$DEFCONFIG"
+
+          while IFS= read -r line; do
+            cfg=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            [ -n "$cfg" ] && sed -i "/# ${cfg} is not set/d" "$DEFCONFIG"
+          done < "$FRAGMENT"
+
+          echo "::notice::Config merged for $DEVICE"
+
+      - name: Build kernel + modules
+        run: |
+          DEVICE="${{ matrix.device }}"
+          mkdir -p out
+
+          COMMON_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            CC="ccache clang"
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            LD_COMPAT=arm-linux-gnueabi-ld
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
+
+          echo "::group::Defconfig"
+          make -j$(nproc) "${COMMON_ARGS[@]}" "${DEVICE}_defconfig"
+          echo "::endgroup::"
+
+          echo "::group::Kernel"
+          make -j$(nproc) "${COMMON_ARGS[@]}" 2>&1 | tee build.log
+          echo "::endgroup::"
+
+          echo "::group::Modules"
+          make -j$(nproc) "${COMMON_ARGS[@]}" modules
+          echo "::endgroup::"
+
+      - name: Collect modules
+        run: |
+          DEVICE="${{ matrix.device }}"
+          DIR="modules_output/${DEVICE}"
+          mkdir -p "$DIR"
+
+          cd out
+          find . -name "*.ko" -print0 | while IFS= read -r -d '' f; do
+            dest="../${DIR}/${f#./}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+          cd ..
+
+          find "$DIR" -name "*.ko" -printf '%P\n' | sort > "$DIR/modules.list"
+          MODULE_COUNT=$(wc -l < "$DIR/modules.list")
+
+          tar -czf "$DIR/modules.tar.gz" -C "$DIR" --exclude='modules.tar.gz' --exclude='modules.list' .
+
+          {
+            echo "Device: ${DEVICE}"
+            echo "Kernel: $(cat out/include/config/kernel.release 2>/dev/null || echo N/A)"
+            echo "Modules: ${MODULE_COUNT} .ko files"
+            echo "Build: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          } > "$DIR/build_info.txt"
+
+          echo "::notice::${MODULE_COUNT} modules collected"
+          echo "=== Modules ==="
+          cat "$DIR/modules.list"
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: modules-${{ matrix.device }}
+          path: modules_output/${{ matrix.device }}/
+          retention-days: 14
+
+      - name: ccache stats
+        run: ccache -s

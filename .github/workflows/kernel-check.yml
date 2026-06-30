@@ -1,0 +1,219 @@
+# Kernel config & code validation (dry-run, no full build)
+# Catches config conflicts, missing Kconfig, syntax errors early
+# Runs in ~2-3 minutes vs 30+ minutes for full build
+
+name: Kernel Check
+
+on:
+  push:
+    branches: [ fix/ksu_panic, sixteen-qpr2 ]
+    paths:
+      - 'scripts/kernelsu_backslashxx_config.fragment'
+      - 'scripts/kernelsu_config.fragment'
+      - 'arch/arm64/configs/*_defconfig'
+      - 'security/selinux/avc.c'
+      - '.github/workflows/build-kernel-backslashxx.yml'
+      - '.github/workflows/build-kernel.yml'
+      - '.github/workflows/build-modules.yml'
+  pull_request:
+    branches: [ sixteen-qpr2 ]
+  workflow_dispatch:
+
+jobs:
+  check-config:
+    name: Config validation
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate fragment vs defconfig conflicts
+        run: |
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
+          DEFCONFIG="arch/arm64/configs/lancelot_defconfig"
+          ERRORS=0
+
+          echo "=== Checking fragment vs defconfig conflicts ==="
+          while IFS= read -r line; do
+            cfg=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            [ -z "$cfg" ] && continue
+            frag_val=$(echo "$line" | grep -oP '=[ym]$' || true)
+            [ -z "$frag_val" ] && continue
+
+            def_val=$(grep "^${cfg}=" "$DEFCONFIG" 2>/dev/null | tail -1 | grep -oP '=[ym]$' || true)
+            if [ -n "$def_val" ] && [ "$frag_val" != "$def_val" ]; then
+              echo "  ❌ CONFLICT: $cfg fragment=$frag_val defconfig=$def_val"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < "$FRAGMENT"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "::error::${ERRORS} config conflicts found"
+            exit 1
+          fi
+          echo "  ✅ No conflicts"
+
+      - name: Check for invalid =m on bool configs
+        run: |
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
+          ERRORS=0
+
+          echo "=== Checking for =m on bool (non-tristate) configs ==="
+          while IFS= read -r line; do
+            cfg=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            val=$(echo "$line" | grep -oP '=[ym]$' || true)
+            [ -z "$cfg" ] || [ "$val" != "=m" ] && continue
+
+            name=$(echo "$cfg" | sed 's/^CONFIG_//')
+            # Search Kconfig for this symbol's type
+            ktype=$(grep -A2 "^config ${name}$\|^menuconfig ${name}$" \
+              $(find . -name Kconfig -not -path './out/*' -not -path './.git/*' -not -path './KernelSU/*') 2>/dev/null \
+              | grep -m1 'tristate\|bool' || true)
+
+            if echo "$ktype" | grep -q "bool"; then
+              echo "  ❌ $cfg=m but Kconfig declares it as bool (use =y or remove)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < "$FRAGMENT"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "::error::${ERRORS} invalid =m on bool configs"
+            exit 1
+          fi
+          echo "  ✅ All =m configs are valid tristate"
+
+      - name: Check for orphan configs (no Kconfig entry)
+        run: |
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
+          ERRORS=0
+
+          echo "=== Checking all configs have Kconfig entries ==="
+          while IFS= read -r line; do
+            cfg=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            [ -z "$cfg" ] && continue
+            name=$(echo "$cfg" | sed 's/^CONFIG_//')
+
+            found=$(grep -rl "^config ${name}$\|^menuconfig ${name}$" \
+              $(find . -name Kconfig -not -path './out/*' -not -path './.git/*' -not -path './KernelSU/*') 2>/dev/null \
+              | head -1)
+
+            if [ -z "$found" ]; then
+              echo "  ⚠️ $cfg: no Kconfig entry found"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < "$FRAGMENT"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "::warning::${ERRORS} configs without Kconfig entries (may be ignored by make)"
+          else
+            echo "  ✅ All configs have Kconfig entries"
+          fi
+
+  check-syntax:
+    name: Syntax check (make defconfig + compile check)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install minimal deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses-dev clang lld llvm \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Merge config + defconfig check
+        run: |
+          DEVICE="lancelot"
+          DEFCONFIG="arch/arm64/configs/${DEVICE}_defconfig"
+          FRAGMENT="scripts/kernelsu_backslashxx_config.fragment"
+
+          # Merge fragment
+          {
+            echo ""
+            echo "# CI check"
+            cat "$FRAGMENT"
+          } >> "$DEFCONFIG"
+
+          while IFS= read -r line; do
+            cfg=$(echo "$line" | grep -oP '^CONFIG_\w+' || true)
+            [ -n "$cfg" ] && sed -i "/# ${cfg} is not set/d" "$DEFCONFIG"
+          done < "$FRAGMENT"
+
+          # Run defconfig (validates all CONFIG options)
+          mkdir -p out
+          make O=out ARCH=arm64 LLVM=1 \
+            CC=clang CROSS_COMPILE=aarch64-linux-gnu- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            "${DEVICE}_defconfig" 2>&1 | tee defconfig.log
+
+          # Check for warnings about invalid values
+          if grep -q "warning:.*invalid" defconfig.log; then
+            echo ""
+            echo "::error::Invalid config values detected:"
+            grep "warning:.*invalid" defconfig.log
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ defconfig generated without errors"
+
+      - name: Compile check (key modified files)
+        run: |
+          mkdir -p out
+
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            CC=clang
+            CROSS_COMPILE=aarch64-linux-gnu-
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu-
+          )
+
+          # Generate headers
+          make -j$(nproc) "${MAKE_ARGS[@]}" prepare 2>&1 | tail -5
+          make -j$(nproc) "${MAKE_ARGS[@]}" scripts 2>&1 | tail -5
+
+          # Compile modified files individually to catch syntax errors
+          ERRORS=0
+          for f in security/selinux/avc.c; do
+            if [ -f "$f" ]; then
+              echo "  Checking $f ..."
+              if ! make -j1 "${MAKE_ARGS[@]}" "${f%.c}.o" 2>&1 | tee -a compile.log; then
+                echo "  ❌ $f failed to compile"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "  ✅ $f OK"
+              fi
+            fi
+          done
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "::error::${ERRORS} files failed compilation check"
+            exit 1
+          fi
+
+      - name: Upload check logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs
+          path: |
+            defconfig.log
+            compile.log
+          retention-days: 3
